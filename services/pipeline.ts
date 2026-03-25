@@ -19,7 +19,7 @@ import { elevenLabsService } from "@/services/elevenlabs";
 import { composerService } from "@/services/composer";
 import { randomId, nowISO } from "@/services/_utils";
 
-type StatusCallback = (update: Partial<MediaProject>) => void;
+type StatusCallback = (update: MediaProject) => void;
 
 // ---------------------------------------------------------------------------
 // runPipeline — main entry point
