@@ -1,18 +1,23 @@
 // =============================================================================
 // PIPELINE ORCHESTRATOR
-// Coordinates the service calls based on the project format:
+// Coordinates service calls based on project.format and the selected model.
 //
-//   Video pipeline: VideoService → ElevenLabs → Composer (Path B)
-//   Image pipeline: ImageService → Composer (Path A)          ← no audio step
+//   Image pipeline: ImageService.generateImage(prompt, model) → Composer Path A
+//   Video pipeline: VideoService.generateVideo(prompt, model)
+//                   + ElevenLabs.generateAudio (parallel)    → Composer Path B
 //
-// Exposes an onUpdate callback so the UI tracker reacts to each status change.
-//
-// This runs entirely client-side for now (using mock services).
-// TODO [PRODUCTION]: Move this to a server-side background job queue
-//   (BullMQ / Inngest / Trigger.dev) so long-running tasks survive page reloads.
+// TODO [PRODUCTION]: Move to a server-side job queue (Inngest / BullMQ)
+//   so long-running tasks survive page reloads and support retries.
 // =============================================================================
 
-import { MediaProject, MediaFormat, ProjectStatus } from "@/types";
+import {
+  MediaProject,
+  MediaFormat,
+  VideoGeneratorId,
+  ImageGeneratorId,
+  VIDEO_GENERATORS,
+  IMAGE_GENERATORS,
+} from "@/types";
 import { videoService } from "@/services/video";
 import { imageService } from "@/services/image";
 import { elevenLabsService } from "@/services/elevenlabs";
@@ -22,7 +27,7 @@ import { randomId, nowISO } from "@/services/_utils";
 type StatusCallback = (update: MediaProject) => void;
 
 // ---------------------------------------------------------------------------
-// runPipeline — main entry point
+// runPipeline
 // ---------------------------------------------------------------------------
 export async function runPipeline(
   project: MediaProject,
@@ -30,40 +35,40 @@ export async function runPipeline(
 ): Promise<MediaProject> {
   let current = { ...project };
 
-  /** Apply a partial update, stamp updated_at, and notify the UI */
   const update = (patch: Partial<MediaProject>): void => {
     current = { ...current, ...patch, updated_at: nowISO() };
     onUpdate(current);
   };
 
-  // ── Stage 1: Generate media ──────────────────────────────────────────────
   update({ status: "generating_media" });
 
+  // ── IMAGE PATH ────────────────────────────────────────────────────────────
   if (project.format === "image") {
-    // ── IMAGE PATH ────────────────────────────────────────────────────────
-    // Pollinations is synchronous — the URL is the request, no async job needed.
-    const imageResult = imageService.generateImage(current.visual_prompt);
-    if (!imageResult.ok) throw new Error(imageResult.error);
+    const model = project.image_generator_model!;
 
+    const imageResult = await imageService.generateImage(current.visual_prompt, model);
+    if (!imageResult.ok) throw new Error(imageResult.error);
     update({ media_url: imageResult.data });
 
-    // ── Stage 2: Composite (image + overlay text only, no audio) ─────────
     update({ status: "compositing" });
 
     const composed = await composerService.compositeMedia(
       imageResult.data,
       current.overlay_text,
-      "image"
+      "image",
+      model
     );
     if (!composed.ok) throw new Error(composed.error);
 
     update({ status: "ready", final_media_url: composed.data });
 
+  // ── VIDEO PATH ────────────────────────────────────────────────────────────
   } else {
-    // ── VIDEO PATH ────────────────────────────────────────────────────────
-    // Run video generation and ElevenLabs TTS in parallel for speed.
+    const model = project.video_generator_model!;
+
+    // Video generation and TTS run in parallel
     const [videoResult, audioResult] = await Promise.all([
-      videoService.generateVideo(current.visual_prompt),
+      videoService.generateVideo(current.visual_prompt, model),
       elevenLabsService.generateAudio(current.voiceover_script),
     ]);
 
@@ -75,13 +80,13 @@ export async function runPipeline(
       elevenlabs_audio_url: audioResult.data,
     });
 
-    // ── Stage 2: Composite (video + audio + overlay text) ─────────────────
     update({ status: "compositing" });
 
     const composed = await composerService.compositeMedia(
       videoResult.data,
       current.overlay_text,
       "video",
+      model,
       audioResult.data
     );
     if (!composed.ok) throw new Error(composed.error);
@@ -93,19 +98,29 @@ export async function runPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// createProject — factory to bootstrap a new MediaProject from user inputs
+// createProject — factory function
 // ---------------------------------------------------------------------------
 export function createProject(
   visualPrompt: string,
   voiceoverScript: string,
   overlayText: string,
-  format: MediaFormat = "video"
+  format: MediaFormat,
+  model: VideoGeneratorId | ImageGeneratorId
 ): MediaProject {
   const now = nowISO();
+
+  // Resolve the human-readable provider name from the generator registry
+  const allGenerators = [...VIDEO_GENERATORS, ...IMAGE_GENERATORS];
+  const generator = allGenerators.find((g) => g.id === model);
+  const provider = generator?.provider ?? "Unknown";
+
   return {
     id: randomId(),
     status: "draft",
     format,
+    provider,
+    video_generator_model: format === "video" ? (model as VideoGeneratorId) : undefined,
+    image_generator_model: format === "image" ? (model as ImageGeneratorId) : undefined,
     visual_prompt: visualPrompt,
     voiceover_script: voiceoverScript,
     overlay_text: overlayText,

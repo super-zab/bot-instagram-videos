@@ -1,40 +1,31 @@
 // =============================================================================
 // TRENDS SERVICE
-// Responsible for sourcing raw ideas/trends that feed the pipeline.
+// Two responsibilities:
 //
-// CURRENT IMPLEMENTATION: manual input only — the UI passes notes directly.
+//   1. createManualTrend() — wraps a user-typed idea into a TrendInput object
+//                            (existing, unchanged)
 //
-// FUTURE INTEGRATIONS (see TODO comments):
-//   • Apify — scrape TikTok / Instagram / Twitter trending content
-//   • Perplexity / You.com API — AI-powered trend research
-//   • RSS feeds from niche subreddits or newsletters
+//   2. fetchCurrentTrends() — scrapes real-time trending topics for the LLM
+//                             context window. Currently uses the Google Trends
+//                             Daily RSS feed (free, no API key required).
+//                             Falls back to Apify if the RSS is unavailable.
+//
 // =============================================================================
 
 import { TrendInput, ServiceResult } from "@/types";
 import { randomId, nowISO } from "@/services/_utils";
 
 // -----------------------------------------------------------------------------
-// TODO [APIFY]: Import the Apify client here once you have an API key.
+// TODO [APIFY]: Uncomment once you have an Apify token.
 //
 //   import { ApifyClient } from "apify-client";
 //   const apifyClient = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
-//
-// Then replace the manual path with a call to the appropriate Actor, e.g.:
-//   const run = await apifyClient.actor("apify/tiktok-scraper").call({ ... });
 // -----------------------------------------------------------------------------
 
-// -----------------------------------------------------------------------------
-// TrendsService
-// -----------------------------------------------------------------------------
 export class TrendsService {
-  /**
-   * createManualTrend
-   * Wraps a user-typed note into a TrendInput object.
-   * This is the only active data path until automated scraping is wired up.
-   *
-   * @param notes  - Free-form text describing the idea
-   * @param sourceUrl - Optional URL the user pasted alongside their idea
-   */
+  // ---------------------------------------------------------------------------
+  // createManualTrend — unchanged; wraps user notes into a TrendInput
+  // ---------------------------------------------------------------------------
   async createManualTrend(
     notes: string,
     sourceUrl?: string
@@ -42,46 +33,98 @@ export class TrendsService {
     if (!notes.trim()) {
       return { ok: false, error: "Notes cannot be empty." };
     }
-
     const trend: TrendInput = {
       id: randomId(),
       notes: notes.trim(),
       source_url: sourceUrl?.trim() || undefined,
       created_at: nowISO(),
     };
-
-    // TODO [PERSISTENCE]: Save trend to your DB (Supabase / PlanetScale / etc.)
-    //   await db.trends.create({ data: trend });
-
+    // TODO [PERSISTENCE]: await db.trends.create({ data: trend });
     return { ok: true, data: trend };
   }
 
   // ---------------------------------------------------------------------------
-  // TODO [APIFY] fetchTrendingTikToks
+  // fetchCurrentTrends
+  //
+  // PRIMARY PATH — Google Trends Daily RSS (free, no key, ~1h cached)
+  //   URL: https://trends.google.com/trending/rss?geo=US&hours=24
+  //   Returns an RSS 2.0 feed of today's top trending searches in the US.
+  //   We extract the top 5 <title> values from <item> elements.
+  //
+  // FALLBACK PATH — Apify (better data, requires token)
+  //   Uncomment the Apify block below and set APIFY_API_TOKEN in .env.local.
+  //
+  // Returns a comma-separated string of trending keywords, e.g.:
+  //   "Super Bowl, ChatGPT, Taylor Swift, NBA All-Star, Wordle"
   // ---------------------------------------------------------------------------
-  // async fetchTrendingTikToks(hashtag: string): Promise<ServiceResult<TrendInput[]>> {
-  //   const run = await apifyClient.actor("clockworks/free-tiktok-scraper").call({
-  //     hashtags: [hashtag],
-  //     resultsPerPage: 10,
-  //   });
-  //   const dataset = await run.dataset().getData();
-  //   const trends = dataset.items.map((item: any) => ({
-  //     id: randomId(),
-  //     source_url: item.webVideoUrl,
-  //     notes: item.text,
-  //     created_at: nowISO(),
-  //   }));
-  //   return { ok: true, data: trends };
-  // }
+  async fetchCurrentTrends(): Promise<string> {
+    // ── PRIMARY: Google Trends RSS ───────────────────────────────────────────
+    try {
+      const res = await fetch(
+        "https://trends.google.com/trending/rss?geo=US&hours=24",
+        {
+          // Next.js fetch cache: revalidate every hour to avoid hammering Google
+          next: { revalidate: 3600 },
+        }
+      );
+
+      if (!res.ok) throw new Error(`Google Trends RSS returned ${res.status}`);
+
+      const xml = await res.text();
+
+      // Extract <title> text from <item> blocks using exec() loop (ES5-safe).
+      // Google Trends wraps values in CDATA: <title><![CDATA[Topic]]></title>
+      const itemPattern = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>/g;
+      const cdataPattern = /<!\[CDATA\[([\s\S]*?)\]\]>/;
+      const topics: string[] = [];
+      let match: RegExpExecArray | null;
+      // eslint-disable-next-line no-cond-assign
+      while ((match = itemPattern.exec(xml)) !== null && topics.length < 5) {
+        const raw = match[1];
+        const cdata = cdataPattern.exec(raw);
+        const text = (cdata ? cdata[1] : raw).trim();
+        if (text) topics.push(text);
+      }
+
+      if (topics.length > 0) {
+        console.log(`[TrendsService] Google Trends topics: ${topics.join(", ")}`);
+        return topics.join(", ");
+      }
+    } catch (err) {
+      console.warn("[TrendsService] Google Trends RSS failed:", err);
+    }
+
+    // ── SECONDARY: Apify TikTok Trending Actor ───────────────────────────────
+    // TODO [APIFY]: Uncomment to use Apify as a higher-quality fallback.
+    //
+    // try {
+    //   const run = await apifyClient
+    //     .actor("clockworks/free-tiktok-scraper")
+    //     .call({ hashtags: ["trending", "viral", "fyp"], resultsPerPage: 5 });
+    //
+    //   const { items } = await run.dataset().getData();
+    //   const topics = items
+    //     .map((item: { text?: string }) => item.text?.split(" ")[0])
+    //     .filter(Boolean)
+    //     .slice(0, 5);
+    //
+    //   if (topics.length > 0) return topics.join(", ");
+    // } catch (err) {
+    //   console.warn("[TrendsService] Apify fallback failed:", err);
+    // }
+
+    // ── FINAL FALLBACK: static seed topics ──────────────────────────────────
+    // Used when both network calls fail (offline dev, rate limited, etc.)
+    const fallback = "AI tools, productivity hacks, programming memes, pop culture, viral challenges";
+    console.log(`[TrendsService] Using static fallback topics: ${fallback}`);
+    return fallback;
+  }
 
   // ---------------------------------------------------------------------------
-  // TODO [APIFY] fetchTrendingInstagramReels
+  // TODO: fetchTrendingTikToks / fetchTrendingInstagramReels (Apify)
   // ---------------------------------------------------------------------------
-  // async fetchTrendingInstagramReels(tag: string): Promise<ServiceResult<TrendInput[]>> {
-  //   // Use "apify/instagram-hashtag-scraper" actor
-  //   // ...
-  // }
+  // async fetchTrendingTikToks(hashtag: string): Promise<ServiceResult<TrendInput[]>> { ... }
+  // async fetchTrendingInstagramReels(tag: string): Promise<ServiceResult<TrendInput[]>> { ... }
 }
 
-// Singleton export so the rest of the app imports one instance
 export const trendsService = new TrendsService();

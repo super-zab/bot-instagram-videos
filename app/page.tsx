@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { useState, useCallback } from "react";
-import { MediaProject, MediaFormat, TrendInput } from "@/types";
+import { MediaProject, MediaFormat, VideoGeneratorId, ImageGeneratorId, TrendInput, GeneratedIdea } from "@/types";
 import { runPipeline, createProject } from "@/services/pipeline";
 import IdeaIngestion from "@/components/IdeaIngestion";
 import ProjectEditor from "@/components/ProjectEditor";
@@ -34,12 +34,22 @@ export default function DashboardPage() {
   const [activeTrend, setActiveTrend] = useState<TrendInput | null>(null);
   const [project, setProject] = useState<MediaProject | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
+  /**
+   * Holds the structured idea emitted by the Ideation Engine.
+   * Passed to ProjectEditor as `controlledValues` which triggers a useEffect
+   * that auto-fills the Visual Prompt, Overlay Text, and Voiceover Script fields.
+   */
+  const [generatedIdea, setGeneratedIdea] = useState<GeneratedIdea | null>(null);
 
   // ── Step 0: Idea confirmed → move to editing ───────────────────────────────
-  const handleIdeaConfirmed = useCallback((trend: TrendInput) => {
-    setActiveTrend(trend);
-    setDashState("editing");
-  }, []);
+  const handleIdeaConfirmed = useCallback(
+    (trend: TrendInput, idea?: GeneratedIdea) => {
+      setActiveTrend(trend);
+      if (idea) setGeneratedIdea(idea);
+      setDashState("editing");
+    },
+    []
+  );
 
   // ── Step 1: User runs the pipeline ─────────────────────────────────────────
   const handleRunPipeline = useCallback(
@@ -47,9 +57,10 @@ export default function DashboardPage() {
       visualPrompt: string,
       voiceoverScript: string,
       overlayText: string,
-      format: MediaFormat
+      format: MediaFormat,
+      model: VideoGeneratorId | ImageGeneratorId
     ) => {
-      const newProject = createProject(visualPrompt, voiceoverScript, overlayText, format);
+      const newProject = createProject(visualPrompt, voiceoverScript, overlayText, format, model);
       setProject(newProject);
       setDashState("running");
 
@@ -90,6 +101,7 @@ export default function DashboardPage() {
   const handleReset = useCallback(() => {
     setProject(null);
     setActiveTrend(null);
+    setGeneratedIdea(null);
     setDashState("idle");
     setIsPublishing(false);
   }, []);
@@ -147,9 +159,10 @@ export default function DashboardPage() {
                 <StepLabel number={2} label="Craft Creative Inputs" />
                 <ProjectEditor
                   initialValues={{
-                    // Pre-fill the visual prompt with the trend notes as a starting point
                     visual_prompt: activeTrend?.notes ?? "",
                   }}
+                  // Auto-fills all fields when the Ideation Engine generates an idea
+                  controlledValues={generatedIdea}
                   onRunPipeline={handleRunPipeline}
                   isRunning={dashState === "running"}
                 />

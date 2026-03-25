@@ -2,15 +2,25 @@
 
 // =============================================================================
 // ProjectEditor — Step 2 of the pipeline
-// Lets the user craft the creative inputs and choose the output format.
 //
-// Format toggle controls which fields are shown:
-//   "video" → Visual Prompt + Voiceover Script + Overlay Text
-//   "image" → Visual Prompt + Overlay Text only  (no audio needed)
+// Controls:
+//   1. Format toggle   — Video / Image
+//   2. Generator select — dropdown populated by VIDEO_GENERATORS or IMAGE_GENERATORS
+//   3. Visual Prompt   — always visible
+//   4. Voiceover Script — video only
+//   5. Overlay Text    — always visible
 // =============================================================================
 
-import { useState } from "react";
-import { MediaProject, MediaFormat } from "@/types";
+import { useState, useEffect } from "react";
+import {
+  MediaProject,
+  MediaFormat,
+  VideoGeneratorId,
+  ImageGeneratorId,
+  GeneratedIdea,
+  VIDEO_GENERATORS,
+  IMAGE_GENERATORS,
+} from "@/types";
 import {
   Card,
   CardHeader,
@@ -22,42 +32,75 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Film, ImageIcon, Mic2, Type } from "lucide-react";
+import { Select } from "@/components/ui/select";
+import { Film, ImageIcon, Mic2, Type, Cpu } from "lucide-react";
 
 interface ProjectEditorProps {
-  /** Pre-filled values (e.g. trend notes auto-mapped to the visual prompt) */
   initialValues?: Partial<Pick<MediaProject, "visual_prompt" | "voiceover_script" | "overlay_text">>;
-  /** Called when the user saves and wants to run the pipeline */
+  /**
+   * When the Ideation Engine generates an idea it passes a GeneratedIdea here.
+   * A useEffect watches this prop and auto-fills all textarea fields.
+   * The user can still edit the fields afterwards before running the pipeline.
+   */
+  controlledValues?: GeneratedIdea | null;
+  /** Called when the user submits — receives all values including format + model */
   onRunPipeline: (
     visualPrompt: string,
     voiceoverScript: string,
     overlayText: string,
-    format: MediaFormat
+    format: MediaFormat,
+    model: VideoGeneratorId | ImageGeneratorId
   ) => void;
-  /** Whether the pipeline is currently running */
   isRunning: boolean;
 }
 
+// Tier badge colours for the generator description line
+const TIER_STYLE: Record<string, string> = {
+  free:      "text-emerald-400",
+  freemium:  "text-amber-400",
+  paid:      "text-rose-400",
+};
+
 export default function ProjectEditor({
   initialValues,
+  controlledValues,
   onRunPipeline,
   isRunning,
 }: ProjectEditorProps) {
   // ── Format toggle ─────────────────────────────────────────────────────────
   const [format, setFormat] = useState<MediaFormat>("video");
 
-  // ── Field state ───────────────────────────────────────────────────────────
-  const [visualPrompt, setVisualPrompt] = useState(
-    initialValues?.visual_prompt ?? ""
-  );
-  const [voiceoverScript, setVoiceoverScript] = useState(
-    initialValues?.voiceover_script ?? ""
-  );
-  const [overlayText, setOverlayText] = useState(
-    initialValues?.overlay_text ?? ""
+  // ── Generator model ───────────────────────────────────────────────────────
+  // Defaults to the first option for the current format.
+  const generators = format === "video" ? VIDEO_GENERATORS : IMAGE_GENERATORS;
+  const [model, setModel] = useState<VideoGeneratorId | ImageGeneratorId>(
+    generators[0].id
   );
 
-  // Voiceover is only required for the video format
+  // When the format changes, reset model to the first option of the new list
+  useEffect(() => {
+    const list = format === "video" ? VIDEO_GENERATORS : IMAGE_GENERATORS;
+    setModel(list[0].id);
+  }, [format]);
+
+  // Metadata for the currently selected generator (for the description blurb)
+  const selectedGenerator = generators.find((g) => g.id === model) ?? generators[0];
+
+  // ── Field state ───────────────────────────────────────────────────────────
+  const [visualPrompt, setVisualPrompt]       = useState(initialValues?.visual_prompt    ?? "");
+  const [voiceoverScript, setVoiceoverScript] = useState(initialValues?.voiceover_script ?? "");
+  const [overlayText, setOverlayText]         = useState(initialValues?.overlay_text     ?? "");
+
+  // When the Ideation Engine emits a GeneratedIdea, auto-fill all fields.
+  // The user can still edit any field before hitting "Run Pipeline".
+  useEffect(() => {
+    if (!controlledValues) return;
+    setVisualPrompt(controlledValues.visual_prompt);
+    setOverlayText(controlledValues.overlay_text);
+    setVoiceoverScript(controlledValues.voiceover_script);
+  }, [controlledValues]);
+
+  // Voiceover only required for video
   const canRun =
     visualPrompt.trim().length > 0 &&
     (format === "image" || voiceoverScript.trim().length > 0) &&
@@ -70,7 +113,8 @@ export default function ProjectEditor({
       visualPrompt.trim(),
       voiceoverScript.trim(),
       overlayText.trim(),
-      format
+      format,
+      model
     );
   };
 
@@ -78,22 +122,21 @@ export default function ProjectEditor({
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          {format === "video" ? (
-            <Film className="h-5 w-5 text-brand-500" />
-          ) : (
-            <ImageIcon className="h-5 w-5 text-brand-500" />
-          )}
+          {format === "video"
+            ? <Film className="h-5 w-5 text-brand-500" />
+            : <ImageIcon className="h-5 w-5 text-brand-500" />
+          }
           Project Editor
         </CardTitle>
         <CardDescription>
-          Choose a format, then define the creative layers of your post.
+          Choose a format and AI generator, then define the creative layers.
         </CardDescription>
       </CardHeader>
 
       <CardContent>
         <form id="project-form" onSubmit={handleSubmit} className="flex flex-col gap-5">
 
-          {/* ── Format Toggle ────────────────────────────────────────────── */}
+          {/* ── 1. Format Toggle ─────────────────────────────────────────── */}
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-semibold text-zinc-200">Format</label>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden w-fit">
@@ -124,21 +167,40 @@ export default function ProjectEditor({
                 Image
               </button>
             </div>
+          </div>
+
+          {/* ── 2. AI Generator Select ───────────────────────────────────── */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-brand-400" />
+              Select AI Generator
+            </label>
+            <Select
+              value={model}
+              onChange={(e) => setModel(e.target.value as VideoGeneratorId | ImageGeneratorId)}
+              disabled={isRunning}
+              options={generators.map((g) => ({
+                value: g.id,
+                label: `${g.label} — ${g.provider}`,
+                badge: g.tier,
+              }))}
+            />
+            {/* Description blurb for the selected generator */}
             <p className="text-xs text-zinc-500">
-              {format === "video"
-                ? "Generates a short video clip via Fal.ai + ElevenLabs voiceover."
-                : "Generates a static image via Pollinations.ai — no voiceover needed."}
+              {selectedGenerator.description}{" "}
+              <span className={`font-semibold ${TIER_STYLE[selectedGenerator.tier] ?? "text-zinc-400"}`}>
+                [{selectedGenerator.tier}]
+              </span>
             </p>
           </div>
 
-          {/* ── Field 1: Visual Prompt (always visible) ──────────────────── */}
+          {/* ── 3. Visual Prompt (always visible) ───────────────────────── */}
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              {format === "video" ? (
-                <Film className="h-4 w-4 text-brand-400" />
-              ) : (
-                <ImageIcon className="h-4 w-4 text-brand-400" />
-              )}
+              {format === "video"
+                ? <Film className="h-4 w-4 text-brand-400" />
+                : <ImageIcon className="h-4 w-4 text-brand-400" />
+              }
               Visual Prompt
               <span className="text-xs font-normal text-zinc-500 ml-1">— Visuals</span>
             </label>
@@ -155,13 +217,14 @@ export default function ProjectEditor({
               required
             />
             <p className="text-xs text-zinc-500">
+              Sent to <span className="text-zinc-300">{selectedGenerator.provider}</span>.{" "}
               {format === "video"
-                ? "Sent to Fal.ai/Replicate. Be specific about mood, camera movement, and aspect ratio (9:16 for Reels)."
-                : "Sent to Pollinations.ai. Be descriptive — style, lighting, mood, and composition matter."}
+                ? "Include mood, camera movement, and aspect ratio (9:16 for Reels)."
+                : "Be descriptive — style, lighting, mood, and composition all matter."}
             </p>
           </div>
 
-          {/* ── Field 2: Voiceover Script (video only) ───────────────────── */}
+          {/* ── 4. Voiceover Script (video only) ────────────────────────── */}
           {format === "video" && (
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
@@ -178,13 +241,12 @@ export default function ProjectEditor({
                 required
               />
               <p className="text-xs text-zinc-500">
-                ElevenLabs will synthesise this with the Rachel voice (configurable).
-                Aim for 15–30 seconds of speech.
+                ElevenLabs will synthesise this with the Rachel voice. Aim for 15–30 seconds.
               </p>
             </div>
           )}
 
-          {/* ── Field 3: Overlay / Meme Caption (always visible) ─────────── */}
+          {/* ── 5. Overlay Text (always visible) ────────────────────────── */}
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
               <Type className="h-4 w-4 text-amber-400" />
@@ -200,10 +262,10 @@ export default function ProjectEditor({
             />
             <p className="text-xs text-zinc-500">
               Burned into the bottom of the frame via FFmpeg{" "}
-              <code className="text-zinc-400">drawtext</code> filter. Keep it short
-              (under 60 chars).
+              <code className="text-zinc-400">drawtext</code> filter. Under 60 chars.
             </p>
           </div>
+
         </form>
       </CardContent>
 
@@ -216,7 +278,10 @@ export default function ProjectEditor({
           size="lg"
           className="w-full"
         >
-          {isRunning ? "Pipeline Running…" : `Run ${format === "video" ? "Video" : "Image"} Pipeline →`}
+          {isRunning
+            ? "Pipeline Running…"
+            : `Run ${format === "video" ? "Video" : "Image"} Pipeline →`
+          }
         </Button>
       </CardFooter>
     </Card>

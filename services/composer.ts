@@ -1,48 +1,56 @@
 // =============================================================================
-// COMPOSER SERVICE  (FFmpeg Media Compositing)
+// COMPOSER SERVICE  — FFmpeg Media Compositing
 //
-// Handles the final composition step for both media formats:
+// Branches on both `format` AND `model` to apply the correct composition path:
 //
-//   PATH A — Image format:
-//     Input  : image URL (from Pollinations)
-//     Process: FFmpeg drawtext filter burns the overlay caption onto the image
-//     Output : final JPEG/PNG with text baked in
-//     Note   : No audio track needed for static images.
+//   PATH A — Image  (all image models)
+//     Input  : image URL (Pollinations, HF, OpenAI CDN, etc.)
+//     Process: FFmpeg drawtext filter burns caption onto the image
+//     Output : final JPEG with text baked in
+//     Note   : No audio track for static images.
 //
-//   PATH B — Video format:
-//     Input 0: video URL  (mp4 from Fal.ai / Replicate)
+//     Model-specific notes inside PATH A:
+//       pollinations  → URL loads lazily; FFmpeg will fetch it directly
+//       hg-flux       → Blob was uploaded to storage; URL is a regular CDN link
+//       nano-banana   → Same as hg-flux (Gradio returns a CDN URL)
+//       dalle3        → OpenAI URLs expire in ~1h — must be re-uploaded to
+//                       storage before reaching the composer (handled in image.ts)
+//
+//   PATH B — Video  (all video models)
+//     Input 0: video URL  (mp4 from Fal.ai or HF SVD)
 //     Input 1: audio URL  (mp3 from ElevenLabs)
-//     Process: FFmpeg drawtext + amerge filter graph
-//     Output : final H.264/AAC mp4 with voiceover and caption
+//     Process: FFmpeg drawtext + audio replace + H.264/AAC re-encode
+//     Output : final mp4 with voiceover and caption
 //
-// REAL IMPLEMENTATION NOTES:
+//     Model-specific notes inside PATH B:
+//       fal-kling     → Returns a standard CDN mp4; no special handling needed
+//       hg-gradio-svd → Gradio returns a temporary URL; re-upload before here
+//
+// REAL IMPLEMENTATION:
 //   npm install fluent-ffmpeg @types/fluent-ffmpeg
-//   Ensure the ffmpeg binary is available in your server environment.
-//   On Vercel: use a Lambda layer or a self-hosted runner (Fly.io / Railway).
-//   On Railway/Fly.io: ffmpeg is available by default in most base images.
+//   FFmpeg binary must be available on the server. Use Railway / Fly.io.
+//   Vercel does NOT support FFmpeg binaries.
 // =============================================================================
 
-import { MediaFormat, ServiceResult } from "@/types";
+import { MediaFormat, VideoGeneratorId, ImageGeneratorId, ServiceResult } from "@/types";
 import { fakDelay, randomId } from "@/services/_utils";
 
-// ---------------------------------------------------------------------------
-// ComposerService
-// ---------------------------------------------------------------------------
 export class ComposerService {
   /**
    * compositeMedia
-   * Branches on `format` to apply the correct composition pipeline.
+   * Main entry point — validates inputs and branches to the correct path.
    *
-   * @param mediaUrl    - CDN URL of the raw generated media (video mp4 or image URL)
-   * @param overlayText - Short caption to burn into the frame via drawtext
-   * @param format      - "video" or "image" — determines which FFmpeg path to use
-   * @param audioUrl    - CDN URL of the ElevenLabs mp3 (required only for "video")
-   * @returns           - ServiceResult containing the URL of the final composed file
+   * @param mediaUrl    - Raw generated media URL (video mp4 or image)
+   * @param overlayText - Caption text to burn into the frame (drawtext)
+   * @param format      - "video" | "image" — selects the composition path
+   * @param model       - The generator that produced mediaUrl (for logging + future model-specific tuning)
+   * @param audioUrl    - ElevenLabs mp3 URL (required only when format === "video")
    */
   async compositeMedia(
     mediaUrl: string,
     overlayText: string,
     format: MediaFormat,
+    model: VideoGeneratorId | ImageGeneratorId,
     audioUrl?: string
   ): Promise<ServiceResult<string>> {
     if (!mediaUrl) {
@@ -52,94 +60,118 @@ export class ComposerService {
       return { ok: false, error: "audioUrl is required for video compositing." };
     }
 
-    if (format === "image") {
-      return this._compositeImage(mediaUrl, overlayText);
-    } else {
-      return this._compositeVideo(mediaUrl, audioUrl!, overlayText);
-    }
+    return format === "image"
+      ? this._compositeImage(mediaUrl, overlayText, model as ImageGeneratorId)
+      : this._compositeVideo(mediaUrl, audioUrl!, overlayText, model as VideoGeneratorId);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PATH A — Image composition (Pollinations image + drawtext overlay)
-  // ─────────────────────────────────────────────────────────────────────────
+  // ──────────────────────────────────────────────────────────────────────────
+  // PATH A — Image composition
+  // ──────────────────────────────────────────────────────────────────────────
   private async _compositeImage(
     imageUrl: string,
-    overlayText: string
+    overlayText: string,
+    model: ImageGeneratorId
   ): Promise<ServiceResult<string>> {
-    // ── REAL IMPLEMENTATION (fluent-ffmpeg, image path) ───────────────────
+    // Model-specific pre-processing notes:
+    //
+    //   pollinations  → imageUrl is a live Pollinations request URL.
+    //                   FFmpeg will resolve it on-the-fly with -i <url>.
+    //                   No pre-download needed.
+    //
+    //   hg-flux       → imageUrl is already a persistent storage URL
+    //                   (blob was uploaded in _hgFlux before returning here).
+    //
+    //   nano-banana   → Same as hg-flux.
+    //
+    //   dalle3        → imageUrl must be a persistent storage URL.
+    //                   OpenAI CDN URLs expire after ~1h — the _dalle3
+    //                   method must re-upload before returning its URL.
+    //                   If you skip that step, FFmpeg will get a 403 here.
+    //
+    console.log(`[ComposerService:image] model=${model}, url=${imageUrl}`);
+
+    // ── REAL IMPLEMENTATION (fluent-ffmpeg, single-frame image) ──────────
     //
     // import ffmpeg from "fluent-ffmpeg";
     // import path from "path";
     // import os from "os";
     //
-    // const outputPath = path.join(os.tmpdir(), `composed_image_${randomId()}.jpg`);
+    // const outputPath = path.join(os.tmpdir(), `composed_${randomId()}.jpg`);
     //
     // await new Promise<void>((resolve, reject) => {
     //   ffmpeg()
-    //     // Input: the raw Pollinations image (fetched remotely)
     //     .input(imageUrl)
-    //     // Apply drawtext filter to burn the caption at bottom-centre
     //     .videoFilter(
     //       `drawtext=text='${escapeFFmpegText(overlayText)}':` +
+    //       `fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
     //       `fontcolor=white:fontsize=52:` +
     //       `box=1:boxcolor=black@0.55:boxborderw=10:` +
     //       `x=(w-text_w)/2:y=h-120`
     //     )
-    //     // Output as a single JPEG frame (no video container needed)
-    //     .frames(1)
+    //     .frames(1)          // output a single still frame
     //     .output(outputPath)
     //     .on("end", resolve)
     //     .on("error", reject)
     //     .run();
     // });
     //
-    // TODO [STORAGE]: Upload outputPath to your storage bucket:
+    // TODO [STORAGE]:
     //   const finalUrl = await uploadToStorage(`final_${randomId()}.jpg`, fs.readFileSync(outputPath));
     //   return { ok: true, data: finalUrl };
     // ── END REAL ──────────────────────────────────────────────────────────
 
-    // MOCK — simulates composition latency for an image (~1.5s, much faster than video)
+    // MOCK — image composition is fast (~1.5s)
     await fakDelay(1500);
-    const finalUrl = `https://storage.example.com/final/composed_image_${randomId()}.jpg`;
-    console.log(`[ComposerService] Mock image composition complete: ${finalUrl}`);
+    const finalUrl = `https://storage.example.com/final/image_${model}_${randomId()}.jpg`;
+    console.log(`[ComposerService:image] Mock complete: ${finalUrl}`);
     return { ok: true, data: finalUrl };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PATH B — Video composition (Fal.ai/Replicate mp4 + ElevenLabs mp3 + drawtext)
-  // ─────────────────────────────────────────────────────────────────────────
+  // ──────────────────────────────────────────────────────────────────────────
+  // PATH B — Video composition
+  // ──────────────────────────────────────────────────────────────────────────
   private async _compositeVideo(
     videoUrl: string,
     audioUrl: string,
-    overlayText: string
+    overlayText: string,
+    model: VideoGeneratorId
   ): Promise<ServiceResult<string>> {
-    // ── REAL IMPLEMENTATION (fluent-ffmpeg, video path) ───────────────────
+    // Model-specific notes:
+    //
+    //   fal-kling     → Standard mp4 CDN URL; no special handling needed.
+    //                   `-shortest` flag handles duration mismatch between
+    //                   the 5s clip and the ElevenLabs audio.
+    //
+    //   hg-gradio-svd → Gradio returns a temporary signed URL.
+    //                   The _hgGradioSVD method must re-upload to storage
+    //                   before returning, otherwise FFmpeg gets a 403 here.
+    //
+    console.log(`[ComposerService:video] model=${model}, videoUrl=${videoUrl}`);
+
+    // ── REAL IMPLEMENTATION (fluent-ffmpeg, video + audio) ────────────────
     //
     // import ffmpeg from "fluent-ffmpeg";
     // import path from "path";
     // import os from "os";
     //
-    // const outputPath = path.join(os.tmpdir(), `composed_video_${randomId()}.mp4`);
+    // const outputPath = path.join(os.tmpdir(), `composed_${randomId()}.mp4`);
     //
     // await new Promise<void>((resolve, reject) => {
     //   ffmpeg()
-    //     // Input 0: Video track (Fal.ai / Replicate clip)
-    //     .input(videoUrl)
-    //     // Input 1: Audio track (ElevenLabs voiceover)
-    //     .input(audioUrl)
-    //     // Video filter: burn the overlay caption at bottom-centre
-    //     //   drawtext filter reference: https://ffmpeg.org/ffmpeg-filters.html#drawtext
+    //     .input(videoUrl)   // Input 0: AI-generated video clip
+    //     .input(audioUrl)   // Input 1: ElevenLabs voiceover mp3
     //     .videoFilter(
     //       `drawtext=text='${escapeFFmpegText(overlayText)}':` +
+    //       `fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
     //       `fontcolor=white:fontsize=52:` +
     //       `box=1:boxcolor=black@0.55:boxborderw=10:` +
     //       `x=(w-text_w)/2:y=h-120`
     //     )
-    //     // Re-encode video as H.264 for broad social platform compatibility
     //     .videoCodec("libx264")
-    //     // Replace original audio track with the ElevenLabs voiceover (AAC)
     //     .audioCodec("aac")
-    //     // Stop encoding when the shorter of the two streams ends
+    //     // -shortest: stop when the shorter stream ends
+    //     // -movflags faststart: put moov atom at front for web streaming
     //     .outputOptions(["-shortest", "-movflags faststart"])
     //     .output(outputPath)
     //     .on("end", resolve)
@@ -147,25 +179,23 @@ export class ComposerService {
     //     .run();
     // });
     //
-    // TODO [STORAGE]: Upload outputPath to your storage bucket:
+    // TODO [STORAGE]:
     //   const finalUrl = await uploadToStorage(`final_${randomId()}.mp4`, fs.readFileSync(outputPath));
     //   return { ok: true, data: finalUrl };
     // ── END REAL ──────────────────────────────────────────────────────────
 
-    // MOCK — simulates a slow FFmpeg video render (~3.5s)
+    // MOCK — video render is slower (~3.5s)
     await fakDelay(3500);
-    const finalUrl = `https://storage.example.com/final/composed_video_${randomId()}.mp4`;
-    console.log(`[ComposerService] Mock video composition complete: ${finalUrl}`);
+    const finalUrl = `https://storage.example.com/final/video_${model}_${randomId()}.mp4`;
+    console.log(`[ComposerService:video] Mock complete: ${finalUrl}`);
     return { ok: true, data: finalUrl };
   }
 }
 
 // ---------------------------------------------------------------------------
 // Helper: escape special characters for the FFmpeg drawtext filter
-// (used in real implementation above — uncomment when activating)
 // ---------------------------------------------------------------------------
 // function escapeFFmpegText(text: string): string {
-//   // drawtext uses : and ' as delimiters — they must be escaped with backslash
 //   return text
 //     .replace(/\\/g, "\\\\")
 //     .replace(/'/g, "\\'")
