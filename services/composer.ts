@@ -1,26 +1,28 @@
 // =============================================================================
 // COMPOSER SERVICE  (FFmpeg Media Compositing)
-// Merges the Luma video clip, ElevenLabs audio track, and text overlay
-// into a single publishable MP4 file.
 //
-// REAL IMPLEMENTATION — uses `fluent-ffmpeg` (Node.js FFmpeg wrapper)
-// Install:  npm install fluent-ffmpeg @types/fluent-ffmpeg
-//           Also ensure ffmpeg binary is available in your server environment.
-//           On Vercel: use a Lambda layer or a self-hosted runner (Fly.io / Railway).
+// Handles the final composition step for both media formats:
 //
-// FFMPEG PIPELINE OVERVIEW:
-//   Input 0 : luma_video_url  (remote .mp4 — the visual)
-//   Input 1 : audio_url       (remote .mp3 — the ElevenLabs voiceover)
+//   PATH A — Image format:
+//     Input  : image URL (from Pollinations)
+//     Process: FFmpeg drawtext filter burns the overlay caption onto the image
+//     Output : final JPEG/PNG with text baked in
+//     Note   : No audio track needed for static images.
 //
-//   Filter graph:
-//     [0:v] drawtext=text='OVERLAY_TEXT':fontcolor=white:fontsize=48:
-//              box=1:boxcolor=black@0.5:x=(w-text_w)/2:y=h-100 [captioned]
-//     [captioned][1:a] — amerge / shortest=1 — [out]
+//   PATH B — Video format:
+//     Input 0: video URL  (mp4 from Fal.ai / Replicate)
+//     Input 1: audio URL  (mp3 from ElevenLabs)
+//     Process: FFmpeg drawtext + amerge filter graph
+//     Output : final H.264/AAC mp4 with voiceover and caption
 //
-//   Output: final_output.mp4  (H.264 + AAC, re-encoded at target bitrate)
+// REAL IMPLEMENTATION NOTES:
+//   npm install fluent-ffmpeg @types/fluent-ffmpeg
+//   Ensure the ffmpeg binary is available in your server environment.
+//   On Vercel: use a Lambda layer or a self-hosted runner (Fly.io / Railway).
+//   On Railway/Fly.io: ffmpeg is available by default in most base images.
 // =============================================================================
 
-import { ServiceResult } from "@/types";
+import { MediaFormat, ServiceResult } from "@/types";
 import { fakDelay, randomId } from "@/services/_utils";
 
 // ---------------------------------------------------------------------------
@@ -29,53 +31,115 @@ import { fakDelay, randomId } from "@/services/_utils";
 export class ComposerService {
   /**
    * compositeMedia
-   * Combines the video, audio and text overlay into the final MP4.
+   * Branches on `format` to apply the correct composition pipeline.
    *
-   * @param videoUrl    - CDN URL of the raw Luma video clip
-   * @param audioUrl    - CDN URL of the ElevenLabs MP3 voiceover
-   * @param overlayText - Short caption to burn into the bottom of the frame
-   * @returns           - ServiceResult containing the final video URL
+   * @param mediaUrl    - CDN URL of the raw generated media (video mp4 or image URL)
+   * @param overlayText - Short caption to burn into the frame via drawtext
+   * @param format      - "video" or "image" — determines which FFmpeg path to use
+   * @param audioUrl    - CDN URL of the ElevenLabs mp3 (required only for "video")
+   * @returns           - ServiceResult containing the URL of the final composed file
    */
   async compositeMedia(
-    videoUrl: string,
-    audioUrl: string,
-    overlayText: string
+    mediaUrl: string,
+    overlayText: string,
+    format: MediaFormat,
+    audioUrl?: string
   ): Promise<ServiceResult<string>> {
-    if (!videoUrl || !audioUrl) {
-      return {
-        ok: false,
-        error: "Both videoUrl and audioUrl are required for compositing.",
-      };
+    if (!mediaUrl) {
+      return { ok: false, error: "mediaUrl is required for compositing." };
+    }
+    if (format === "video" && !audioUrl) {
+      return { ok: false, error: "audioUrl is required for video compositing." };
     }
 
-    // ── REAL IMPLEMENTATION (fluent-ffmpeg) ──────────────────────────────
+    if (format === "image") {
+      return this._compositeImage(mediaUrl, overlayText);
+    } else {
+      return this._compositeVideo(mediaUrl, audioUrl!, overlayText);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PATH A — Image composition (Pollinations image + drawtext overlay)
+  // ─────────────────────────────────────────────────────────────────────────
+  private async _compositeImage(
+    imageUrl: string,
+    overlayText: string
+  ): Promise<ServiceResult<string>> {
+    // ── REAL IMPLEMENTATION (fluent-ffmpeg, image path) ───────────────────
     //
     // import ffmpeg from "fluent-ffmpeg";
     // import path from "path";
     // import os from "os";
     //
-    // const outputPath = path.join(os.tmpdir(), `composed_${randomId()}.mp4`);
+    // const outputPath = path.join(os.tmpdir(), `composed_image_${randomId()}.jpg`);
     //
     // await new Promise<void>((resolve, reject) => {
     //   ffmpeg()
-    //     // Input 0: Video track (Luma clip)
-    //     .input(videoUrl)
-    //     // Input 1: Audio track (ElevenLabs voiceover)
-    //     .input(audioUrl)
-    //     // Video filter: burn in the overlay text at the bottom-centre
-    //     //   - drawtext filter reference: https://ffmpeg.org/ffmpeg-filters.html#drawtext
-    //     //   - We escape special chars in overlayText before interpolation
+    //     // Input: the raw Pollinations image (fetched remotely)
+    //     .input(imageUrl)
+    //     // Apply drawtext filter to burn the caption at bottom-centre
     //     .videoFilter(
     //       `drawtext=text='${escapeFFmpegText(overlayText)}':` +
     //       `fontcolor=white:fontsize=52:` +
     //       `box=1:boxcolor=black@0.55:boxborderw=10:` +
     //       `x=(w-text_w)/2:y=h-120`
     //     )
-    //     // Audio: replace the original Luma audio (if any) with the voiceover
-    //     .audioCodec("aac")
-    //     // Video: re-encode to H.264 for broad compatibility
+    //     // Output as a single JPEG frame (no video container needed)
+    //     .frames(1)
+    //     .output(outputPath)
+    //     .on("end", resolve)
+    //     .on("error", reject)
+    //     .run();
+    // });
+    //
+    // TODO [STORAGE]: Upload outputPath to your storage bucket:
+    //   const finalUrl = await uploadToStorage(`final_${randomId()}.jpg`, fs.readFileSync(outputPath));
+    //   return { ok: true, data: finalUrl };
+    // ── END REAL ──────────────────────────────────────────────────────────
+
+    // MOCK — simulates composition latency for an image (~1.5s, much faster than video)
+    await fakDelay(1500);
+    const finalUrl = `https://storage.example.com/final/composed_image_${randomId()}.jpg`;
+    console.log(`[ComposerService] Mock image composition complete: ${finalUrl}`);
+    return { ok: true, data: finalUrl };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PATH B — Video composition (Fal.ai/Replicate mp4 + ElevenLabs mp3 + drawtext)
+  // ─────────────────────────────────────────────────────────────────────────
+  private async _compositeVideo(
+    videoUrl: string,
+    audioUrl: string,
+    overlayText: string
+  ): Promise<ServiceResult<string>> {
+    // ── REAL IMPLEMENTATION (fluent-ffmpeg, video path) ───────────────────
+    //
+    // import ffmpeg from "fluent-ffmpeg";
+    // import path from "path";
+    // import os from "os";
+    //
+    // const outputPath = path.join(os.tmpdir(), `composed_video_${randomId()}.mp4`);
+    //
+    // await new Promise<void>((resolve, reject) => {
+    //   ffmpeg()
+    //     // Input 0: Video track (Fal.ai / Replicate clip)
+    //     .input(videoUrl)
+    //     // Input 1: Audio track (ElevenLabs voiceover)
+    //     .input(audioUrl)
+    //     // Video filter: burn the overlay caption at bottom-centre
+    //     //   drawtext filter reference: https://ffmpeg.org/ffmpeg-filters.html#drawtext
+    //     .videoFilter(
+    //       `drawtext=text='${escapeFFmpegText(overlayText)}':` +
+    //       `fontcolor=white:fontsize=52:` +
+    //       `box=1:boxcolor=black@0.55:boxborderw=10:` +
+    //       `x=(w-text_w)/2:y=h-120`
+    //     )
+    //     // Re-encode video as H.264 for broad social platform compatibility
     //     .videoCodec("libx264")
-    //     // Stop when the shorter stream ends (video clip may be shorter than audio)
+    //     // Replace original audio track with the ElevenLabs voiceover (AAC)
+    //     .audioCodec("aac")
+    //     // Stop encoding when the shorter of the two streams ends
     //     .outputOptions(["-shortest", "-movflags faststart"])
     //     .output(outputPath)
     //     .on("end", resolve)
@@ -83,24 +147,25 @@ export class ComposerService {
     //     .run();
     // });
     //
-    // TODO [STORAGE]: Upload the composed file at outputPath to your storage bucket:
+    // TODO [STORAGE]: Upload outputPath to your storage bucket:
     //   const finalUrl = await uploadToStorage(`final_${randomId()}.mp4`, fs.readFileSync(outputPath));
     //   return { ok: true, data: finalUrl };
     // ── END REAL ──────────────────────────────────────────────────────────
 
-    // MOCK — simulates a slow FFmpeg render
+    // MOCK — simulates a slow FFmpeg video render (~3.5s)
     await fakDelay(3500);
-    const finalUrl = `https://storage.example.com/final/composed_${randomId()}.mp4`;
-    console.log(`[ComposerService] Mock composition complete: ${finalUrl}`);
+    const finalUrl = `https://storage.example.com/final/composed_video_${randomId()}.mp4`;
+    console.log(`[ComposerService] Mock video composition complete: ${finalUrl}`);
     return { ok: true, data: finalUrl };
   }
 }
 
 // ---------------------------------------------------------------------------
 // Helper: escape special characters for the FFmpeg drawtext filter
+// (used in real implementation above — uncomment when activating)
 // ---------------------------------------------------------------------------
 // function escapeFFmpegText(text: string): string {
-//   // drawtext uses : and ' as delimiters — they must be escaped
+//   // drawtext uses : and ' as delimiters — they must be escaped with backslash
 //   return text
 //     .replace(/\\/g, "\\\\")
 //     .replace(/'/g, "\\'")

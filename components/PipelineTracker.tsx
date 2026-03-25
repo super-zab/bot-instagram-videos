@@ -2,17 +2,21 @@
 
 // =============================================================================
 // PipelineTracker — visual status timeline
-// Shows which stage the current VideoProject is in.
+// Shows which stage the current MediaProject is in.
 // Each step lights up as the pipeline progresses.
+//
+// The "Generating Media" step description adapts to the project format:
+//   video → "Fal.ai is rendering clip · ElevenLabs is synthesising audio"
+//   image → "Pollinations.ai is generating image"
 // =============================================================================
 
-import { VideoProject, PIPELINE_STEPS, ProjectStatus } from "@/types";
+import { MediaProject, PIPELINE_STEPS, ProjectStatus } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Check, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface PipelineTrackerProps {
-  project: VideoProject | null;
+  project: MediaProject | null;
 }
 
 // Map each status to a Badge variant so colours are semantic
@@ -36,6 +40,7 @@ const ORDERED_STATUSES: ProjectStatus[] = [
 export default function PipelineTracker({ project }: PipelineTrackerProps) {
   const currentStatus = project?.status ?? "draft";
   const currentIndex = ORDERED_STATUSES.indexOf(currentStatus);
+  const isImage = project?.format === "image";
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
@@ -43,9 +48,15 @@ export default function PipelineTracker({ project }: PipelineTrackerProps) {
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-semibold text-zinc-100">Pipeline Tracker</h2>
         {project && (
-          <Badge variant={STATUS_BADGE[currentStatus]}>
-            {currentStatus.replace("_", " ")}
-          </Badge>
+          <div className="flex items-center gap-2">
+            {/* Format badge */}
+            <Badge variant="outline" className="text-xs capitalize">
+              {project.format}
+            </Badge>
+            <Badge variant={STATUS_BADGE[currentStatus]}>
+              {currentStatus.replace("_", " ")}
+            </Badge>
+          </div>
         )}
       </div>
 
@@ -57,6 +68,14 @@ export default function PipelineTracker({ project }: PipelineTrackerProps) {
           const isActive = stepIndex === currentIndex;
           const isPending = stepIndex > currentIndex;
 
+          // Override the "Generating Media" description based on format
+          const description =
+            step.key === "generating_media" && project
+              ? isImage
+                ? "Pollinations.ai is generating your image"
+                : "Fal.ai is rendering video · ElevenLabs is synthesising audio"
+              : step.description;
+
           return (
             <li key={step.key} className="flex items-start gap-4">
               {/* Connector line + icon column */}
@@ -65,12 +84,9 @@ export default function PipelineTracker({ project }: PipelineTrackerProps) {
                 <div
                   className={cn(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                    isDone &&
-                      "border-emerald-500 bg-emerald-500 text-white",
-                    isActive &&
-                      "border-brand-500 bg-brand-500/20 text-brand-400",
-                    isPending &&
-                      "border-zinc-700 bg-zinc-800 text-zinc-600"
+                    isDone && "border-emerald-500 bg-emerald-500 text-white",
+                    isActive && "border-brand-500 bg-brand-500/20 text-brand-400",
+                    isPending && "border-zinc-700 bg-zinc-800 text-zinc-600"
                   )}
                 >
                   {isDone ? (
@@ -111,15 +127,16 @@ export default function PipelineTracker({ project }: PipelineTrackerProps) {
                     isActive ? "text-zinc-300" : "text-zinc-600"
                   )}
                 >
-                  {step.description}
+                  {description}
                 </p>
 
-                {/* Show intermediate asset URLs when available */}
+                {/* Show intermediate asset URLs while generating */}
                 {isActive && project && step.key === "generating_media" && (
                   <AssetStatus
-                    lumaId={project.luma_generation_id}
-                    lumaUrl={project.luma_video_url}
+                    generationId={project.generation_id}
+                    mediaUrl={project.media_url}
                     audioUrl={project.elevenlabs_audio_url}
+                    isImage={isImage}
                   />
                 )}
               </div>
@@ -132,29 +149,35 @@ export default function PipelineTracker({ project }: PipelineTrackerProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Small sub-component that shows asset URLs as they resolve during generation
+// Shows asset URLs as they resolve during the generation stage
 // ---------------------------------------------------------------------------
 function AssetStatus({
-  lumaId,
-  lumaUrl,
+  generationId,
+  mediaUrl,
   audioUrl,
+  isImage,
 }: {
-  lumaId?: string;
-  lumaUrl?: string;
+  generationId?: string;
+  mediaUrl?: string;
   audioUrl?: string;
+  isImage: boolean;
 }) {
   return (
     <div className="mt-2 flex flex-col gap-1 text-xs font-mono text-zinc-500">
-      {lumaId && !lumaUrl && (
+      {/* Show job ID while video is still rendering */}
+      {generationId && !mediaUrl && (
         <span className="flex items-center gap-1.5">
           <Loader2 className="h-3 w-3 animate-spin text-brand-400" />
-          Luma job: {lumaId}
+          Job: {generationId}
         </span>
       )}
-      {lumaUrl && (
-        <span className="text-emerald-500">✓ Video ready</span>
+      {mediaUrl && (
+        <span className="text-emerald-500">
+          ✓ {isImage ? "Image" : "Video"} ready
+        </span>
       )}
-      {audioUrl && (
+      {/* Audio status is only relevant for the video path */}
+      {!isImage && audioUrl && (
         <span className="text-emerald-500">✓ Audio ready</span>
       )}
     </div>

@@ -6,19 +6,19 @@
 // Layout:
 //   Left column  (2/5 width):
 //     [1] IdeaIngestion  — capture the trend
-//     [2] ProjectEditor  — craft the three creative inputs
+//     [2] ProjectEditor  — craft creative inputs + choose format (video/image)
 //
 //   Right column (3/5 width):
 //     [3] PipelineTracker — live status of the pipeline
 //     [4] FinalPlayer     — preview + publish
 //
 // State flows:
-//   idle → (user confirms idea) → editing → (user runs pipeline) → running
-//   → ready → (user publishes) → published
+//   idle → (idea confirmed) → editing → (pipeline runs) → running
+//   → ready → (published) → published
 // =============================================================================
 
 import { useState, useCallback } from "react";
-import { VideoProject, TrendInput } from "@/types";
+import { MediaProject, MediaFormat, TrendInput } from "@/types";
 import { runPipeline, createProject } from "@/services/pipeline";
 import IdeaIngestion from "@/components/IdeaIngestion";
 import ProjectEditor from "@/components/ProjectEditor";
@@ -26,14 +26,13 @@ import PipelineTracker from "@/components/PipelineTracker";
 import FinalPlayer from "@/components/FinalPlayer";
 import { Zap } from "lucide-react";
 
-// Dashboard UI states
 type DashboardState = "idle" | "editing" | "running" | "ready" | "published";
 
 export default function DashboardPage() {
   // ── App-level state ────────────────────────────────────────────────────────
   const [dashState, setDashState] = useState<DashboardState>("idle");
   const [activeTrend, setActiveTrend] = useState<TrendInput | null>(null);
-  const [project, setProject] = useState<VideoProject | null>(null);
+  const [project, setProject] = useState<MediaProject | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
 
   // ── Step 0: Idea confirmed → move to editing ───────────────────────────────
@@ -44,8 +43,13 @@ export default function DashboardPage() {
 
   // ── Step 1: User runs the pipeline ─────────────────────────────────────────
   const handleRunPipeline = useCallback(
-    async (lumaPrompt: string, voiceoverScript: string, overlayText: string) => {
-      const newProject = createProject(lumaPrompt, voiceoverScript, overlayText);
+    async (
+      visualPrompt: string,
+      voiceoverScript: string,
+      overlayText: string,
+      format: MediaFormat
+    ) => {
+      const newProject = createProject(visualPrompt, voiceoverScript, overlayText, format);
       setProject(newProject);
       setDashState("running");
 
@@ -71,13 +75,13 @@ export default function DashboardPage() {
     setIsPublishing(true);
 
     // TODO [REAL]: Call your publish service here, e.g.:
-    //   await instagramService.publish(project.final_composed_video_url!, caption);
-    //   await tiktokService.publish(project.final_composed_video_url!, caption);
+    //   await instagramService.publish(project.final_media_url!, caption);
+    //   await tiktokService.publish(project.final_media_url!, caption);
 
     // Mock: simulate upload latency
     await new Promise((r) => setTimeout(r, 1500));
 
-    setProject((p) => p ? { ...p, status: "published" } : p);
+    setProject((p) => (p ? { ...p, status: "published" } : p));
     setDashState("published");
     setIsPublishing(false);
   }, [project]);
@@ -101,7 +105,7 @@ export default function DashboardPage() {
               <Zap className="h-4 w-4 text-white" />
             </div>
             <span className="text-lg font-bold text-zinc-100 tracking-tight">
-              VideoPipeline
+              MediaPipeline
             </span>
             <span className="hidden text-xs text-zinc-500 sm:block">
               AI Social Media Automation
@@ -143,8 +147,8 @@ export default function DashboardPage() {
                 <StepLabel number={2} label="Craft Creative Inputs" />
                 <ProjectEditor
                   initialValues={{
-                    // Pre-fill prompt with the trend notes as a starting point
-                    luma_prompt: activeTrend?.notes ?? "",
+                    // Pre-fill the visual prompt with the trend notes as a starting point
+                    visual_prompt: activeTrend?.notes ?? "",
                   }}
                   onRunPipeline={handleRunPipeline}
                   isRunning={dashState === "running"}
@@ -178,7 +182,7 @@ export default function DashboardPage() {
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer className="mt-16 border-t border-zinc-800 px-6 py-6 text-center text-xs text-zinc-600">
-        VideoPipeline — Luma AI · ElevenLabs · FFmpeg · Next.js 14
+        MediaPipeline — Fal.ai · Pollinations.ai · ElevenLabs · FFmpeg · Next.js 14
       </footer>
     </div>
   );
